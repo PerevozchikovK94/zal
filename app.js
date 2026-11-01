@@ -47,7 +47,7 @@ const STR = {
     full: 'Не удалось сохранить: память заполнена', ton: 'т',
     account: 'Аккаунт', email: 'Почта', password: 'Пароль', signIn: 'Войти', signUp: 'Создать аккаунт', signOut: 'Выйти',
     toSignUp: 'Нет аккаунта? Создать', toSignIn: 'Уже есть аккаунт? Войти', badLogin: 'Неверная почта или пароль', badEmail: 'Проверь почту',
-    shortPw: 'Пароль — минимум 8 символов', taken: 'Такой аккаунт уже есть — войди', authFail: 'Не получилось — проверь сеть и попробуй ещё раз', welcome: 'Готово, синхронизирую', confirm: 'Аккаунт создан. Подтверди почту по ссылке из письма и войди',
+    shortPw: 'Пароль — минимум 8 символов', taken: 'Такой аккаунт уже есть — войди', authFail: 'Не получилось — проверь сеть и попробуй ещё раз', welcome: 'Готово, синхронизирую', unconfirmed: 'Почта не подтверждена — напиши Косте', confirm: 'Аккаунт создан. Подтверди почту по ссылке из письма и войди',
     acctHint: 'Войди, чтобы тренировки хранились в облаке: они переживут смену телефона, а история с часов будет подтягиваться сама. У каждого своя почта — и своя статистика.',
     syncNow: 'Синхронизировать', synced: x => `Синхронизировано ${x}`, syncing: 'Синхронизирую…', offline: 'Нет сети — синхронизирую позже', notSynced: 'Ещё не синхронизировано',
     localOnly: n => `${n} трен. · хранятся на этом телефоне`, cloud: (n, k) => `${n} трен. · ${k} подх. · в облаке`,
@@ -80,7 +80,7 @@ const STR = {
     full: 'Couldn’t save: storage is full', ton: 't',
     account: 'Account', email: 'Email', password: 'Password', signIn: 'Sign in', signUp: 'Create account', signOut: 'Sign out',
     toSignUp: 'No account? Create one', toSignIn: 'Have an account? Sign in', badLogin: 'Wrong email or password', badEmail: 'Check the email address',
-    shortPw: 'Password needs at least 8 characters', taken: 'That account already exists — sign in', authFail: 'Didn’t work — check the connection and try again', welcome: 'Done, syncing', confirm: 'Account created. Confirm your email via the link, then sign in',
+    shortPw: 'Password needs at least 8 characters', taken: 'That account already exists — sign in', authFail: 'Didn’t work — check the connection and try again', welcome: 'Done, syncing', unconfirmed: 'Email not confirmed yet — ask the app owner', confirm: 'Account created. Confirm your email via the link, then sign in',
     acctHint: 'Sign in to keep workouts in the cloud: they survive a new phone, and watch history syncs in automatically. Everyone uses their own email and sees only their own stats.',
     syncNow: 'Sync now', synced: x => `Synced ${x}`, syncing: 'Syncing…', offline: 'Offline — will sync later', notSynced: 'Not synced yet',
     localOnly: n => `${n} workouts · stored on this phone`, cloud: (n, k) => `${n} workouts · ${k} sets · in the cloud`,
@@ -221,7 +221,7 @@ async function authSubmit() {
       : await cloud.client.auth.signUp({email, password});
     if (res.error) {
       const m = (res.error.message || '').toLowerCase();
-      toast(m.includes('already') ? t('taken') : m.includes('invalid') ? t('badLogin') : t('authFail')); return;
+      toast(m.includes('already') ? t('taken') : m.includes('not confirmed') ? t('unconfirmed') : m.includes('invalid') ? t('badLogin') : t('authFail')); return;
     }
     if (!res.data.session) { toast(t('confirm')); authMode = 'in'; render(); return; }
     cloud.user = res.data.session.user;
