@@ -50,6 +50,12 @@ const STR = {
     shortPw: 'Пароль — минимум 8 символов', taken: 'Такой аккаунт уже есть — войди', authFail: 'Не получилось — проверь сеть и попробуй ещё раз', welcome: 'Готово, синхронизирую', unconfirmed: 'Почта не подтверждена — напиши Косте', confirm: 'Аккаунт создан. Подтверди почту по ссылке из письма и войди',
     acctHint: 'Войди, чтобы тренировки хранились в облаке: они переживут смену телефона, а история с часов будет подтягиваться сама. У каждого своя почта — и своя статистика.',
     syncNow: 'Синхронизировать', synced: x => `Синхронизировано ${x}`, syncing: 'Синхронизирую…', offline: 'Нет сети — синхронизирую позже', notSynced: 'Ещё не синхронизировано',
+    garmin: 'Garmin', gHint: 'Тренировки с часов будут подтягиваться сами. Создай личный ключ в Garmin Connect (Настройки → Personal API → Create key, срок — 1 год), скопируй и вставь сюда. Ключ хранится на сервере, приложение его не показывает.',
+    gOpen: 'Открыть Garmin Connect', gKey: 'Ключ Personal API', gLink: 'Подключить Garmin', gLinking: 'Подключаю и загружаю историю…',
+    gLinked: (n, x) => `Подключено · загружено тренировок: ${n}` + (x ? ` · обновлено ${x}` : ''), gPull: 'Обновить из Garmin', gUnlink: 'Отключить Garmin', gUnlinked: 'Garmin отключён',
+    gDone: n => n ? `Из Garmin загружено тренировок: ${n}` : 'Новых тренировок в Garmin нет', gBadKey: 'Garmin не принял ключ — проверь, что скопировал его целиком',
+    gExpired: 'Ключ Garmin больше не работает — создай новый и вставь его сюда', gDown: 'Garmin сейчас не отвечает, попробуй позже', gMore: n => `ещё ${n} — догружу при следующей синхронизации`,
+    confirmAll: n => `Подтвердить подсказки Garmin (${n})`,
     localOnly: n => `${n} трен. · хранятся на этом телефоне`, cloud: (n, k) => `${n} трен. · ${k} подх. · в облаке`,
   },
   en: {
@@ -83,6 +89,12 @@ const STR = {
     shortPw: 'Password needs at least 8 characters', taken: 'That account already exists — sign in', authFail: 'Didn’t work — check the connection and try again', welcome: 'Done, syncing', unconfirmed: 'Email not confirmed yet — ask the app owner', confirm: 'Account created. Confirm your email via the link, then sign in',
     acctHint: 'Sign in to keep workouts in the cloud: they survive a new phone, and watch history syncs in automatically. Everyone uses their own email and sees only their own stats.',
     syncNow: 'Sync now', synced: x => `Synced ${x}`, syncing: 'Syncing…', offline: 'Offline — will sync later', notSynced: 'Not synced yet',
+    garmin: 'Garmin', gHint: 'Watch workouts will come in automatically. Create a personal key in Garmin Connect (Settings → Personal API → Create key, 1-year expiry), copy it and paste it here. The key is stored on the server; the app never shows it.',
+    gOpen: 'Open Garmin Connect', gKey: 'Personal API key', gLink: 'Connect Garmin', gLinking: 'Connecting and loading history…',
+    gLinked: (n, x) => `Connected · workouts loaded: ${n}` + (x ? ` · updated ${x}` : ''), gPull: 'Update from Garmin', gUnlink: 'Disconnect Garmin', gUnlinked: 'Garmin disconnected',
+    gDone: n => n ? `Workouts loaded from Garmin: ${n}` : 'No new workouts in Garmin', gBadKey: 'Garmin didn’t accept the key — make sure you copied all of it',
+    gExpired: 'Your Garmin key stopped working — create a new one and paste it here', gDown: 'Garmin isn’t responding, try later', gMore: n => `${n} more — they’ll load on the next sync`,
+    confirmAll: n => `Accept Garmin suggestions (${n})`,
     localOnly: n => `${n} workouts · stored on this phone`, cloud: (n, k) => `${n} workouts · ${k} sets · in the cloud`,
   },
 };
@@ -184,7 +196,7 @@ async function initCloud() {
   cloud.user = data.session?.user || null;
   cloud.client.auth.onAuthStateChange((_e, session) => { cloud.user = session?.user || null; refreshAcct(); });
   if (top().v === 'settings') render();
-  if (cloud.user) sync();
+  if (cloud.user) { sync(); garminRefresh(); garminPull(false); }
 }
 addEventListener('online', () => scheduleSync(200));
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') scheduleSync(200); });
@@ -196,6 +208,59 @@ function acctStatus() {
   return t('notSynced');
 }
 let authMode = 'in';
+const garmin = {status: null, busy: false};
+const GSYNC_KEY = 'gymlog.garminAt';
+async function garminCall(action, extra = {}) {
+  const {data, error} = await cloud.client.functions.invoke('garmin-sync', {body: {action, ...extra}});
+  if (error) {
+    let body = null; try { body = await error.context?.json?.(); } catch {}
+    return {error: body?.error || 'unavailable'};
+  }
+  return data;
+}
+async function garminRefresh() { if (!cloud.user) return; const d = await garminCall('status'); if (!d.error) { garmin.status = d; if (top().v === 'settings' && $('#sheet').hidden) render(); } }
+async function garminPull(manual) {
+  if (!cloud.user || garmin.busy) return;
+  if (!manual) { let at = 0; try { at = +localStorage.getItem(GSYNC_KEY) || 0; } catch {} if (Date.now() - at < 30 * 60e3) return; }
+  try { localStorage.setItem(GSYNC_KEY, String(Date.now())); } catch {}
+  garmin.busy = true; if (manual) render();
+  const d = await garminCall('sync');
+  garmin.busy = false;
+  if (d.linked === false) { garmin.status = d; if (manual) render(); return; }
+  if (!d.error) garmin.status = d;
+  if (manual) toast(d.result?.ok ? t('gDone', d.result.imported) : d.result?.error === 'key_rejected' ? t('gExpired') : t('gDown'));
+  await sync(); if (manual || top().v === 'settings') render();
+}
+function garminHTML() {
+  if (!cloud.user) return '';
+  const st = garmin.status;
+  let h = `<div class="section-title" style="padding-top:4px">${t('garmin')}</div>`;
+  if (st?.linked) {
+    const when = st.synced_at ? new Date(st.synced_at).toLocaleTimeString(loc(), {hour: '2-digit', minute: '2-digit'}) : '';
+    const err = st.last_error === 'key_rejected' ? `<p class="hint" style="color:var(--danger);padding-bottom:8px">${t('gExpired')}</p>` : '';
+    h += err + `<div class="list" style="margin-bottom:12px"><div class="row"><span class="t"><b>Garmin Connect</b><span>${esc(t('gLinked', st.imported || 0, when))}</span></span></div></div>
+      <div class="stack" style="margin-bottom:24px"><button class="btn quiet" data-a="g-pull" ${garmin.busy ? 'disabled' : ''}>${garmin.busy ? t('syncing') : t('gPull')}</button>
+      ${st.last_error === 'key_rejected' ? garminForm() : ''}<button class="btn danger" data-a="g-unlink">${t('gUnlink')}</button></div>`;
+  } else h += `<p class="hint" style="padding-bottom:12px">${t('gHint')}</p><div class="stack" style="margin-bottom:24px">
+      <a class="btn quiet" href="https://connect.garmin.com/app/settings/personalApiToken" target="_blank" rel="noopener">${t('gOpen')} ↗</a>${garminForm()}</div>`;
+  return h;
+}
+function garminForm() {
+  return `<form id="garminForm" class="stack"><label class="field">${t('gKey')}<input id="garminKey" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" required></label>
+    <button class="btn primary" type="submit" ${garmin.busy ? 'disabled' : ''}>${garmin.busy ? t('gLinking') : t('gLink')}</button></form>`;
+}
+async function garminLink() {
+  const key = ($('#garminKey').value || '').trim(); if (!key) return;
+  garmin.busy = true; render(); toast(t('gLinking'));
+  const d = await garminCall('link', {key});
+  garmin.busy = false;
+  if (d.error) { toast(d.error === 'key_rejected' || d.error === 'bad_key' ? t('gBadKey') : t('gDown')); render(); return; }
+  garmin.status = d; try { localStorage.setItem(GSYNC_KEY, String(Date.now())); } catch {}
+  const n = d.result?.imported || 0, rest = d.result?.remaining || 0;
+  toast(t('gDone', n) + (rest ? ' · ' + t('gMore', rest) : ''));
+  await sync(); render();
+}
+document.addEventListener('submit', ev => { if (ev.target.id === 'garminForm') { ev.preventDefault(); garminLink(); } });
 function acctHTML() {
   if (!cloud.client) return '';
   if (cloud.user) return `<div class="section-title" style="padding-top:4px">${t('account')}</div>
@@ -226,7 +291,7 @@ async function authSubmit() {
     if (!res.data.session) { toast(t('confirm')); authMode = 'in'; render(); return; }
     cloud.user = res.data.session.user;
     db.dirty = [...new Set([...db.dirty, ...db.sessions.map(x => x.id)])]; db.customDirty = true; db.pulledAt = null;
-    render(); toast(t('welcome')); sync();
+    render(); toast(t('welcome')); sync(); garminRefresh();
   } catch { toast(t('authFail')); }
   finally { if (btn.isConnected) btn.disabled = false; }
 }
@@ -358,6 +423,8 @@ function vSession(id) {
     if (g && g.key === key) g.idx.push(i); else groups.push({key, ex: x.ex, hint: x.hint, g: x.g, idx: [i]});
   });
   if (groups.some(g => !g.ex)) h += `<p class="hint" style="padding-bottom:8px">${t('garminHint')}</p>`;
+  const hinted = s.sets.filter(x => !x.ex && x.hint && ex(x.hint)).length;
+  if (hinted) h += `<button class="btn quiet" data-a="confirm-hints" data-sid="${esc(s.id)}" style="margin-bottom:8px">${t('confirmAll', hinted)}</button>`;
   h += groups.map((g, gi) => {
     const chips = g.idx.map(i => `<button data-a="edit-set" data-sid="${esc(s.id)}" data-i="${i}">${s.sets[i].w > 0 ? fW(s.sets[i].w) : t('bwShort')}<span class="x"> × </span>${s.sets[i].r}</button>`).join('');
     if (g.ex) return `<div class="group"><div class="group-head"><h2>${esc(exName(g.ex))}</h2></div><div class="chips">${chips}</div></div>`;
@@ -499,7 +566,7 @@ addEventListener('resize', () => { if (top().v === 'exercise') drawChart(); });
 function vSettings() {
   const n = db.sessions.length, sets = db.sessions.reduce((a, s) => a + s.sets.length, 0);
   const sub = cloud.user ? t('cloud', n, sets) : t('stored', n, sets);
-  return header({back: t('workouts'), title: t('settings'), sub}) + acctHTML() + `
+  return header({back: t('workouts'), title: t('settings'), sub}) + acctHTML() + garminHTML() + `
     <div class="section-title" style="padding-top:4px">${t('language')}</div>
     <div class="seg" role="group" aria-label="${t('language')}" style="margin-bottom:24px"><button data-a="lang" data-l="ru" aria-pressed="${lang === 'ru'}">Русский</button><button data-a="lang" data-l="en" aria-pressed="${lang === 'en'}">English</button></div>
     <div class="stack">
@@ -636,7 +703,14 @@ document.addEventListener('click', ev => {
     }
     case 'export': exportData(); break;
     case 'auth-mode': authMode = authMode === 'in' ? 'up' : 'in'; render(); break;
-    case 'sync-now': sync(); break;
+    case 'sync-now': if (garmin.status?.linked) garminPull(true); else sync(); break;
+    case 'g-pull': garminPull(true); break;
+    case 'g-unlink': garminCall('unlink').then(() => { garmin.status = {linked: false}; toast(t('gUnlinked')); render(); }); break;
+    case 'confirm-hints': {
+      const ss = db.sessions.find(q => q.id === el.dataset.sid); let n = 0;
+      for (const x of ss.sets) if (!x.ex && x.hint && ex(x.hint)) { x.ex = x.hint; delete x.b; delete x.hint; delete x.g; n++; }
+      persist(); render(); toast(t('assigned', n, '✓')); break;
+    }
     case 'sign-out': {
       cloud.client.auth.signOut().finally(() => { cloud.user = null; cloud.last = null; db.pulledAt = null; persist(); render(); });
       break;

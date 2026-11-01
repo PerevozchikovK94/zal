@@ -134,3 +134,4 @@ h2{font-size:20px;font-weight:600;letter-spacing:-.01em}
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(var(--tab) + 16px + env(safe-area-inset-bottom,0px));z-index:30;background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:12px;font-size:15px;font-weight:500;max-width:calc(100% - 40px);width:max-content;text-align:center}
 .empty{padding:40px 0;text-align:center;color:var(--muted)}
 .empty b{display:block;color:var(--ink);font-size:17px;margin-bottom:4px}
+a.btn{text-decoration:none}
