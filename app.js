@@ -45,6 +45,12 @@ const STR = {
     savedW: n => `Тренировка сохранена · ${n} подх.`, checkWR: 'Проверь вес и повторы', saved: 'Сохранено', setDel: 'Подход удалён', wDel: 'Тренировка удалена',
     loaded: n => `Загружено тренировок: ${n}`, noNew: 'Новых тренировок в файле нет', badFile: 'Не получилось прочитать файл — нужен .json из этого приложения',
     full: 'Не удалось сохранить: память заполнена', ton: 'т',
+    account: 'Аккаунт', email: 'Почта', password: 'Пароль', signIn: 'Войти', signUp: 'Создать аккаунт', signOut: 'Выйти',
+    toSignUp: 'Нет аккаунта? Создать', toSignIn: 'Уже есть аккаунт? Войти', badLogin: 'Неверная почта или пароль', badEmail: 'Проверь почту',
+    shortPw: 'Пароль — минимум 8 символов', taken: 'Такой аккаунт уже есть — войди', authFail: 'Не получилось — проверь сеть и попробуй ещё раз', welcome: 'Готово, синхронизирую', confirm: 'Аккаунт создан. Подтверди почту по ссылке из письма и войди',
+    acctHint: 'Войди, чтобы тренировки хранились в облаке: они переживут смену телефона, а история с часов будет подтягиваться сама. У каждого своя почта — и своя статистика.',
+    syncNow: 'Синхронизировать', synced: x => `Синхронизировано ${x}`, syncing: 'Синхронизирую…', offline: 'Нет сети — синхронизирую позже', notSynced: 'Ещё не синхронизировано',
+    localOnly: n => `${n} трен. · хранятся на этом телефоне`, cloud: (n, k) => `${n} трен. · ${k} подх. · в облаке`,
   },
   en: {
     workouts: 'Workouts', exercises: 'Exercises', settings: 'Settings', sections: 'Sections',
@@ -72,6 +78,12 @@ const STR = {
     savedW: n => `Workout saved · ${n} sets`, checkWR: 'Check weight and reps', saved: 'Saved', setDel: 'Set deleted', wDel: 'Workout deleted',
     loaded: n => `Workouts loaded: ${n}`, noNew: 'No new workouts in this file', badFile: 'Couldn’t read the file — use a .json from this app',
     full: 'Couldn’t save: storage is full', ton: 't',
+    account: 'Account', email: 'Email', password: 'Password', signIn: 'Sign in', signUp: 'Create account', signOut: 'Sign out',
+    toSignUp: 'No account? Create one', toSignIn: 'Have an account? Sign in', badLogin: 'Wrong email or password', badEmail: 'Check the email address',
+    shortPw: 'Password needs at least 8 characters', taken: 'That account already exists — sign in', authFail: 'Didn’t work — check the connection and try again', welcome: 'Done, syncing', confirm: 'Account created. Confirm your email via the link, then sign in',
+    acctHint: 'Sign in to keep workouts in the cloud: they survive a new phone, and watch history syncs in automatically. Everyone uses their own email and sees only their own stats.',
+    syncNow: 'Sync now', synced: x => `Synced ${x}`, syncing: 'Syncing…', offline: 'Offline — will sync later', notSynced: 'Not synced yet',
+    localOnly: n => `${n} workouts · stored on this phone`, cloud: (n, k) => `${n} workouts · ${k} sets · in the cloud`,
   },
 };
 const t = (k, ...a) => { const v = STR[lang][k] ?? STR.ru[k]; return typeof v === 'function' ? v(...a) : v; };
@@ -89,9 +101,136 @@ function load() {
   return d;
 }
 function persist() {
+  trackChanges();
   try { localStorage.setItem(KEY, JSON.stringify(db)); }
   catch { toast(t('full')); }
+  scheduleSync();
 }
+
+/* ---------- cloud sync (Supabase): local-first, last write wins per workout ---------- */
+const CFG = window.ZAL_CONFIG || {};
+const cloud = {client: null, user: null, state: 'idle', last: null, timer: null, running: false};
+const bare = x => { const {updatedAt, ...rest} = x; return JSON.stringify(rest); };
+let shadow = new Map(db.sessions.map(x => [x.id, bare(x)]));
+db.dirty = db.dirty || [];
+db.tomb = db.tomb || {};
+function trackChanges() {
+  const now = Date.now(), seen = new Set(), dirty = new Set(db.dirty);
+  for (const x of db.sessions) {
+    seen.add(x.id);
+    const b = bare(x);
+    if (shadow.get(x.id) !== b) { x.updatedAt = now; dirty.add(x.id); shadow.set(x.id, b); delete db.tomb[x.id]; }
+  }
+  for (const id of [...shadow.keys()]) if (!seen.has(id)) { shadow.delete(id); db.tomb[id] = now; dirty.add(id); }
+  const custom = JSON.stringify(db.exercises.filter(e => e.id.startsWith('c-')));
+  if (custom !== db.customSeen) { db.customSeen = custom; db.customDirty = true; }
+  db.dirty = [...dirty];
+}
+function scheduleSync(delay = 1500) { if (!cloud.user) return; clearTimeout(cloud.timer); cloud.timer = setTimeout(sync, delay); }
+async function sync() {
+  if (!cloud.client || !cloud.user || cloud.running) return;
+  if (!navigator.onLine) { cloud.state = 'offline'; refreshAcct(); return; }
+  cloud.running = true; cloud.state = 'syncing'; refreshAcct();
+  try {
+    const sb = cloud.client, uid = cloud.user.id;
+    // push
+    const ids = [...db.dirty];
+    if (ids.length) {
+      const rows = ids.map(id => {
+        const x = db.sessions.find(q => q.id === id);
+        return x ? {user_id: uid, id, date: x.date, data: x, deleted: false} : {user_id: uid, id, date: today(), data: {}, deleted: true};
+      });
+      const {error} = await sb.from('sessions').upsert(rows, {onConflict: 'user_id,id'});
+      if (error) throw error;
+      db.dirty = db.dirty.filter(id => !ids.includes(id));
+      for (const id of ids) delete db.tomb[id];
+    }
+    if (db.customDirty) {
+      const {error} = await sb.from('profiles').upsert({user_id: uid, exercises: db.exercises.filter(e => e.id.startsWith('c-'))}, {onConflict: 'user_id'});
+      if (error) throw error;
+      db.customDirty = false;
+    }
+    // pull
+    let q = sb.from('sessions').select('id,data,deleted,updated_at').order('updated_at', {ascending: true}).limit(1000);
+    if (db.pulledAt && db.pulledUser === uid) q = q.gt('updated_at', db.pulledAt);
+    const {data: rows, error} = await q;
+    if (error) throw error;
+    let changed = false;
+    for (const row of rows) {
+      if (db.dirty.includes(row.id)) continue;
+      const i = db.sessions.findIndex(x => x.id === row.id);
+      if (row.deleted) { if (i >= 0 && row.id !== db.active) { db.sessions.splice(i, 1); changed = true; } }
+      else if (i < 0) { db.sessions.push(row.data); changed = true; }
+      else if (bare(db.sessions[i]) !== bare(row.data) && row.id !== db.active) { db.sessions[i] = row.data; changed = true; }
+      db.pulledAt = row.updated_at;
+    }
+    db.pulledUser = uid;
+    const prof = await sb.from('profiles').select('exercises').eq('user_id', uid).maybeSingle();
+    for (const e of prof.data?.exercises || []) if (!ex(e.id)) { db.exercises.push(e); changed = true; }
+    shadow = new Map(db.sessions.map(x => [x.id, bare(x)]));
+    db.customSeen = JSON.stringify(db.exercises.filter(e => e.id.startsWith('c-')));
+    try { localStorage.setItem(KEY, JSON.stringify(db)); } catch {}
+    cloud.state = 'ok'; cloud.last = new Date();
+    if (changed && $('#sheet').hidden && top().v !== 'workout') render();
+  } catch (e) {
+    cloud.state = navigator.onLine ? 'error' : 'offline';
+    console.warn('sync failed', e);
+  } finally { cloud.running = false; refreshAcct(); if (db.dirty.length && cloud.state === 'ok') scheduleSync(500); }
+}
+async function initCloud() {
+  if (!CFG.supabaseUrl || !CFG.supabaseKey || !window.supabase) return;
+  cloud.client = window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseKey, {auth: {persistSession: true, autoRefreshToken: true, detectSessionInUrl: false}});
+  const {data} = await cloud.client.auth.getSession();
+  cloud.user = data.session?.user || null;
+  cloud.client.auth.onAuthStateChange((_e, session) => { cloud.user = session?.user || null; refreshAcct(); });
+  if (top().v === 'settings') render();
+  if (cloud.user) sync();
+}
+addEventListener('online', () => scheduleSync(200));
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') scheduleSync(200); });
+function refreshAcct() { const el = document.getElementById('acctStatus'); if (el) el.textContent = acctStatus(); }
+function acctStatus() {
+  if (cloud.state === 'syncing') return t('syncing');
+  if (cloud.state === 'offline') return t('offline');
+  if (cloud.last) return t('synced', cloud.last.toLocaleTimeString(loc(), {hour: '2-digit', minute: '2-digit'}));
+  return t('notSynced');
+}
+let authMode = 'in';
+function acctHTML() {
+  if (!cloud.client) return '';
+  if (cloud.user) return `<div class="section-title" style="padding-top:4px">${t('account')}</div>
+    <div class="list" style="margin-bottom:12px"><div class="row"><span class="t"><b>${esc(cloud.user.email || '')}</b><span id="acctStatus">${esc(acctStatus())}</span></span><button class="nav-btn" data-a="sync-now">${t('syncNow')}</button></div></div>
+    <button class="btn quiet" data-a="sign-out" style="margin-bottom:24px">${t('signOut')}</button>`;
+  return `<div class="section-title" style="padding-top:4px">${t('account')}</div>
+    <p class="hint" style="padding-bottom:12px">${t('acctHint')}</p>
+    <form class="stack" id="authForm" style="margin-bottom:24px">
+      <label class="field">${t('email')}<input id="authEmail" type="email" inputmode="email" autocomplete="username" autocapitalize="off" required></label>
+      <label class="field">${t('password')}<input id="authPw" type="password" autocomplete="${authMode === 'in' ? 'current-password' : 'new-password'}" minlength="8" required></label>
+      <button class="btn primary" type="submit">${authMode === 'in' ? t('signIn') : t('signUp')}</button>
+      <button class="btn quiet" type="button" data-a="auth-mode">${authMode === 'in' ? t('toSignUp') : t('toSignIn')}</button>
+    </form>`;
+}
+async function authSubmit() {
+  const email = ($('#authEmail').value || '').trim(), password = $('#authPw').value || '';
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { toast(t('badEmail')); return; }
+  if (password.length < 8) { toast(t('shortPw')); return; }
+  const btn = $('#authForm button[type=submit]'); btn.disabled = true;
+  try {
+    const res = authMode === 'in'
+      ? await cloud.client.auth.signInWithPassword({email, password})
+      : await cloud.client.auth.signUp({email, password});
+    if (res.error) {
+      const m = (res.error.message || '').toLowerCase();
+      toast(m.includes('already') ? t('taken') : m.includes('invalid') ? t('badLogin') : t('authFail')); return;
+    }
+    if (!res.data.session) { toast(t('confirm')); authMode = 'in'; render(); return; }
+    cloud.user = res.data.session.user;
+    db.dirty = [...new Set([...db.dirty, ...db.sessions.map(x => x.id)])]; db.customDirty = true; db.pulledAt = null;
+    render(); toast(t('welcome')); sync();
+  } catch { toast(t('authFail')); }
+  finally { if (btn.isConnected) btn.disabled = false; }
+}
+document.addEventListener('submit', ev => { if (ev.target.id === 'authForm') { ev.preventDefault(); authSubmit(); } });
 try { navigator.storage?.persist?.(); } catch {}
 
 /* ---------- helpers ---------- */
@@ -359,7 +498,8 @@ addEventListener('resize', () => { if (top().v === 'exercise') drawChart(); });
 
 function vSettings() {
   const n = db.sessions.length, sets = db.sessions.reduce((a, s) => a + s.sets.length, 0);
-  return header({back: t('workouts'), title: t('settings'), sub: t('stored', n, sets)}) + `
+  const sub = cloud.user ? t('cloud', n, sets) : t('stored', n, sets);
+  return header({back: t('workouts'), title: t('settings'), sub}) + acctHTML() + `
     <div class="section-title" style="padding-top:4px">${t('language')}</div>
     <div class="seg" role="group" aria-label="${t('language')}" style="margin-bottom:24px"><button data-a="lang" data-l="ru" aria-pressed="${lang === 'ru'}">Русский</button><button data-a="lang" data-l="en" aria-pressed="${lang === 'en'}">English</button></div>
     <div class="stack">
@@ -495,6 +635,12 @@ document.addEventListener('click', ev => {
       break;
     }
     case 'export': exportData(); break;
+    case 'auth-mode': authMode = authMode === 'in' ? 'up' : 'in'; render(); break;
+    case 'sync-now': sync(); break;
+    case 'sign-out': {
+      cloud.client.auth.signOut().finally(() => { cloud.user = null; cloud.last = null; db.pulledAt = null; persist(); render(); });
+      break;
+    }
     case 'lang': {
       lang = el.dataset.l; try { localStorage.setItem('gymlog.lang', lang); } catch {}
       setupFormat(); for (const k in drafts) delete drafts[k]; render(); break;
@@ -534,5 +680,6 @@ function toast(m) { const box = $('#toast'); box.textContent = m; box.hidden = f
 
 if (db.active && active()) nav.stack = [{v: 'workout'}];
 render();
+initCloud();
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
 })();
